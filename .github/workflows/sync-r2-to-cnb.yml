@@ -1,0 +1,44 @@
+name: Sync R2 Images to CNB Mirror
+on:
+  schedule:
+    - cron: '0 18 * * *'  # UTC 18:00 = 北京时间凌晨2点
+  workflow_dispatch:       # 支持手动触发
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install rclone
+        run: curl https://rclone.org/install.sh | sudo bash
+
+      - name: Configure rclone for R2
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf << EOF
+          [r2]
+          type = s3
+          provider = Cloudflare
+          access_key_id = ${{ secrets.R2_ACCESS_KEY }}
+          secret_access_key = ${{ secrets.R2_SECRET_KEY }}
+          endpoint = https://${{ secrets.CF_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          acl = private
+          EOF
+
+      - name: Sync from R2
+        run: |
+          mkdir -p mirror
+          rclone sync r2:img-r2 mirror/
+
+      - name: Push to CNB
+        run: |
+          cd mirror
+          git init -b main
+          git config user.name "r2-sync-bot"
+          git config user.email "sync@deepalhome.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to sync"
+          else
+            git commit -m "sync: $(date '+%Y-%m-%d %H:%M:%S UTC')"
+            git push --force "https://${{ secrets.CNBUSER }}:${{ secrets.CNBTOKEN }}@cnb.cool/deepalhome/imgbed.git" main:main
+          fi
