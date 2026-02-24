@@ -24,15 +24,15 @@ jobs:
           acl = private
           EOF
 
-      - name: Sync from R2
-        run: |
-          mkdir -p mirror
-          rclone sync r2:img-r2 mirror/
+      - name: Clone CNB repo
+        run: git clone "https://${{ secrets.CNBUSER }}:${{ secrets.CNBTOKEN }}@cnb.cool/deepalhome/imgbed.git" mirror
 
-      - name: Push to CNB
+      - name: Sync from R2
+        run: rclone sync r2:img-r2 mirror/ --exclude ".git/**"
+
+      - name: Push changes to CNB
         run: |
           cd mirror
-          git init -b main
           git config user.name "r2-sync-bot"
           git config user.email "sync@deepalhome.com"
           git add -A
@@ -40,5 +40,5 @@ jobs:
             echo "No changes to sync"
           else
             git commit -m "sync: $(date '+%Y-%m-%d %H:%M:%S UTC')"
-            git push --force "https://${{ secrets.CNBUSER }}:${{ secrets.CNBTOKEN }}@cnb.cool/deepalhome/imgbed.git" main:main
+            git push
           fi
