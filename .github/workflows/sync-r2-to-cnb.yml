@@ -43,6 +43,7 @@ jobs:
           IMAGE_EXT = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.heic', '.heif'}
           ALL_EXT = VIDEO_EXT | IMAGE_EXT
           CACHE_FILE = "docs/api/v1/.metadata-cache.json"
+          THUMB_DIR = "docs/thumbs"
 
           CATEGORIES = [
               {"dir": "pic/动态壁纸",  "output": "docs/api/v1/dynamic.json",   "ext": ALL_EXT},
@@ -81,15 +82,44 @@ jobs:
                   pass
               return w, h
 
-          def probe(filepath, rel, cache):
+          def generate_thumb(root, filepath, rel):
+              thumb_rel = THUMB_DIR + "/" + Path(rel).with_suffix(".jpg").as_posix()
+              thumb_path = os.path.join(root, thumb_rel)
+              os.makedirs(os.path.dirname(thumb_path), exist_ok=True)
+              try:
+                  subprocess.run(
+                      ["ffmpeg", "-y", "-i", filepath, "-vframes", "1",
+                       "-q:v", "2", "-vf", "scale='min(720,iw)':-2", thumb_path],
+                      capture_output=True, timeout=60)
+                  if os.path.isfile(thumb_path) and os.path.getsize(thumb_path) > 0:
+                      print(f"    [thumb] {thumb_rel}")
+                      return thumb_rel
+              except Exception:
+                  pass
+              return None
+
+          def probe(root, filepath, rel, ext, cache):
               size = os.path.getsize(filepath)
               cached = cache.get(rel)
+              is_video = ext in VIDEO_EXT
               if cached and cached.get("size") == size:
-                  return cached["width"], cached["height"], size
+                  thumb_rel = cached.get("thumb")
+                  if is_video and thumb_rel:
+                      thumb_path = os.path.join(root, thumb_rel)
+                      if os.path.isfile(thumb_path):
+                          return cached["width"], cached["height"], size, thumb_rel
+                  elif not is_video:
+                      return cached["width"], cached["height"], size, None
               print(f"    [probe] {rel}")
               w, h = probe_ffmpeg(filepath)
-              cache[rel] = {"size": size, "width": w, "height": h}
-              return w, h, size
+              entry = {"size": size, "width": w, "height": h}
+              thumb_rel = None
+              if is_video:
+                  thumb_rel = generate_thumb(root, filepath, rel)
+                  if thumb_rel:
+                      entry["thumb"] = thumb_rel
+              cache[rel] = entry
+              return w, h, size, thumb_rel
 
           def display_name(filename):
               stem = Path(filename).stem
@@ -118,11 +148,12 @@ jobs:
                   rel = cat["dir"] + "/" + f
                   seen.add(rel)
                   print(f"  {f}")
-                  w, h, sz = probe(fp, rel, cache)
+                  w, h, sz, thumb_rel = probe(root, fp, rel, ext, cache)
                   url = build_url(rel)
+                  thumb_url = build_url(thumb_rel) if thumb_rel else url
                   item = {
                       "full_url": url,
-                      "full_thumb_url": url,
+                      "full_thumb_url": thumb_url,
                       "display_name": display_name(f),
                       "width": w, "height": h, "size": sz,
                   }
@@ -145,6 +176,12 @@ jobs:
 
           stale = [k for k in cache if k not in all_seen]
           for k in stale:
+              thumb = cache[k].get("thumb")
+              if thumb:
+                  tp = os.path.join(root, thumb)
+                  if os.path.isfile(tp):
+                      os.remove(tp)
+                      print(f"    [thumb] removed {thumb}")
               del cache[k]
           if stale:
               print(f"\n[cache] pruned {len(stale)} stale entries")
