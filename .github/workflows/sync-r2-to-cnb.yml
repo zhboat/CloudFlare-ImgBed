@@ -33,6 +33,8 @@ jobs:
           endpoint = https://s3.bitiful.net
           region = cn-east-1
           acl = public-read
+          no_check_bucket = true
+          force_path_style = true
           EOF
 
       - name: Clone CNB repo
