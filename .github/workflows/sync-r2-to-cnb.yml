@@ -8,8 +8,10 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Install rclone
-        run: curl https://rclone.org/install.sh | sudo bash
+      - name: Install rclone & ffmpeg
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
 
       - name: Configure rclone for R2
         run: |
@@ -28,7 +30,129 @@ jobs:
         run: git clone "https://${{ secrets.CNBUSER }}:${{ secrets.CNBTOKEN }}@cnb.cool/deepalhome/imgbed.git" mirror
 
       - name: Sync from R2
-        run: rclone sync r2:img-r2 mirror/ --exclude ".git/**"
+        run: rclone sync r2:img-r2 mirror/ --exclude ".git/**" --exclude "docs/**"
+
+      - name: Generate wallpaper API
+        run: |
+          cat > /tmp/gen_api.py << 'PYEOF'
+          import json, os, subprocess, sys, urllib.parse
+          from pathlib import Path
+
+          BASE_RAW_URL = "https://cnb.cool/deepalhome/imgbed/-/git/raw/main"
+          VIDEO_EXT = {'.mp4', '.m4v', '.mov'}
+          IMAGE_EXT = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.heic', '.heif'}
+          ALL_EXT = VIDEO_EXT | IMAGE_EXT
+          CACHE_FILE = "docs/api/v1/.metadata-cache.json"
+
+          CATEGORIES = [
+              {"dir": "pic/动态壁纸",  "output": "docs/api/v1/dynamic.json",   "ext": ALL_EXT},
+              {"dir": "pic/悬浮球",    "output": "docs/api/v1/floatball.json",  "ext": ALL_EXT},
+              {"dir": "pic/静态壁纸",  "output": "docs/api/v1/static.json",     "ext": IMAGE_EXT},
+          ]
+
+          def load_cache(root):
+              p = os.path.join(root, CACHE_FILE)
+              if os.path.isfile(p):
+                  try:
+                      with open(p, "r", encoding="utf-8") as f:
+                          return json.load(f)
+                  except Exception:
+                      pass
+              return {}
+
+          def save_cache(root, cache):
+              p = os.path.join(root, CACHE_FILE)
+              os.makedirs(os.path.dirname(p), exist_ok=True)
+              with open(p, "w", encoding="utf-8") as f:
+                  json.dump(cache, f, ensure_ascii=False, indent=2)
+
+          def probe_ffmpeg(filepath):
+              w, h = 0, 0
+              try:
+                  r = subprocess.run(
+                      ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", filepath],
+                      capture_output=True, text=True, timeout=30)
+                  if r.returncode == 0:
+                      for s in json.loads(r.stdout).get("streams", []):
+                          if s.get("codec_type") in ("video", "image"):
+                              w, h = int(s.get("width", 0)), int(s.get("height", 0))
+                              break
+              except Exception:
+                  pass
+              return w, h
+
+          def probe(filepath, rel, cache):
+              size = os.path.getsize(filepath)
+              cached = cache.get(rel)
+              if cached and cached.get("size") == size:
+                  return cached["width"], cached["height"], size
+              print(f"    [probe] {rel}")
+              w, h = probe_ffmpeg(filepath)
+              cache[rel] = {"size": size, "width": w, "height": h}
+              return w, h, size
+
+          def display_name(filename):
+              stem = Path(filename).stem
+              parts = stem.split("_", 1)
+              if len(parts) == 2 and not parts[1].isdigit():
+                  return parts[1]
+              return stem
+
+          def build_url(rel):
+              return BASE_RAW_URL + "/" + "/".join(urllib.parse.quote(p) for p in rel.split("/"))
+
+          def generate(root, cat, cache):
+              d = os.path.join(root, cat["dir"])
+              if not os.path.isdir(d):
+                  print(f"  skip (not found): {d}")
+                  return set()
+              items = []
+              seen = set()
+              for f in sorted(os.listdir(d)):
+                  fp = os.path.join(d, f)
+                  if not os.path.isfile(fp):
+                      continue
+                  ext = Path(f).suffix.lower()
+                  if ext not in cat["ext"]:
+                      continue
+                  rel = cat["dir"] + "/" + f
+                  seen.add(rel)
+                  print(f"  {f}")
+                  w, h, sz = probe(fp, rel, cache)
+                  url = build_url(rel)
+                  item = {
+                      "full_url": url,
+                      "full_thumb_url": url,
+                      "display_name": display_name(f),
+                      "width": w, "height": h, "size": sz,
+                  }
+                  if ext in VIDEO_EXT:
+                      item["type"] = 2
+                  items.append(item)
+              out = os.path.join(root, cat["output"])
+              os.makedirs(os.path.dirname(out), exist_ok=True)
+              with open(out, "w", encoding="utf-8") as fh:
+                  json.dump({"data": {"items": items, "total": len(items)}}, fh, ensure_ascii=False, indent=2)
+              print(f"  -> {cat['output']} ({len(items)} items)")
+              return seen
+
+          root = sys.argv[1]
+          cache = load_cache(root)
+          all_seen = set()
+          for c in CATEGORIES:
+              print(f"\n[{c['dir']}]")
+              all_seen |= generate(root, c, cache)
+
+          stale = [k for k in cache if k not in all_seen]
+          for k in stale:
+              del cache[k]
+          if stale:
+              print(f"\n[cache] pruned {len(stale)} stale entries")
+
+          save_cache(root, cache)
+          print(f"\n[cache] {len(cache)} entries saved")
+          PYEOF
+          python3 /tmp/gen_api.py mirror
 
       - name: Push changes to CNB
         run: |
